@@ -8,7 +8,7 @@ with open("README.md", "r", encoding="utf-8") as fh:    long_description = fh.re
 
 setup(
     name="m23-spectrum",
-    version="0.1.0",
+    version="0.2.0",
     author="M23-Spectrum Contributors",
     author_email="contact@m23spectrum.dev",
     description="Algebraic weight initialization for deep neural networks using M23 spectrum",
