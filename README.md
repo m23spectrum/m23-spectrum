@@ -489,8 +489,8 @@ This work builds upon foundational research in:
 
 ## Contact & Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/m23-spectrum/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/m23-spectrum/discussions)
+- **Issues**: [GitHub Issues](https://github.com/m23spectrum/m23-spectrum/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/m23spectrum/m23-spectrum/discussions)
 - **Email**: m23_spectrum@proton.me
 
 ---
