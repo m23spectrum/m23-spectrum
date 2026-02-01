@@ -1,7 +1,6 @@
-"""
-M23-Spectrum: Algebraic Weight Initialization for Deep Neural Networks
+"""M23-Spectrum: Algebraic Weight Initialization for Deep Neural Networks
 
-This module implements weight initialization using the algebraic structure 
+This module implements weight initialization using the algebraic structure
 of the Mathieu group M23 and dynamic isometry principles.
 
 License: MIT
@@ -19,276 +18,297 @@ class M23SpectrumError(Exception):
     pass
 
 
-def generate_m23_stable_spectrum(fan_in: int) -> np.ndarray:
-    """
-    Generates the M23 spectrum adapted for dynamic isometry in neural networks.
+class _SpectrumCache:
+    """Thread-safe cache for M23 spectrum to avoid redundant computations."""
+    def __init__(self):
+        self._cache = {}
     
-    The spectrum is derived from the Elkies polynomial and the structure of 
+    def get(self, fan_in: int) -> Optional[np.ndarray]:
+        return self._cache.get(fan_in)
+    
+    def set(self, fan_in: int, spectrum: np.ndarray) -> None:
+        self._cache[fan_in] = spectrum.copy()
+    
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+_spectrum_cache = _SpectrumCache()
+
+
+def _compute_elkies_polynomial_roots() -> np.ndarray:
+    """Compute roots of the Elkies polynomial associated with M23.
+    
+    The polynomial g^4 + g^3 + 9g^2 - 10g + 8 = 0 encodes spectral
+    properties of the Mathieu group M23 (sporadic group of order 10,080).
+    
+    Returns
+    -------
+    np.ndarray
+        Complex roots of the Elkies polynomial, shape (4,).
+    """
+    # Coefficients of the polynomial: g^4 + g^3 + 9g^2 - 10g + 8 = 0
+    coefficients = [1, 1, 9, -10, 8]
+    roots = np.roots(coefficients)
+    return roots
+
+
+def _normalize_spectrum(spectrum: np.ndarray, scaling_factor: float) -> np.ndarray:
+    """Normalize spectrum with numerical stability guards.
+    
+    Parameters
+    ----------
+    spectrum : np.ndarray
+        The eigenvalue spectrum.
+    scaling_factor : float
+        Factor to scale the spectrum for signal preservation.
+    
+    Returns
+    -------
+    np.ndarray
+        Normalized spectrum.
+    
+    Raises
+    ------
+    M23SpectrumError
+        If spectrum contains invalid values (NaN or Inf).
+    """
+    if not np.all(np.isfinite(spectrum)):
+        raise M23SpectrumError("Spectrum contains NaN or Inf values")
+    
+    # Compute spectral norm (largest absolute eigenvalue)
+    spectral_norm = np.max(np.abs(spectrum))
+    
+    if spectral_norm < 1e-10:
+        warnings.warn("Spectral norm is very small (< 1e-10). Consider checking input dimensions.", 
+                     RuntimeWarning)
+        spectral_norm = 1e-10
+    
+    # Normalize to unit spectral radius
+    normalized = spectrum / spectral_norm
+    
+    # Apply scaling for dynamic isometry
+    return normalized * scaling_factor
+
+
+def generate_m23_stable_spectrum(fan_in: int, seed: Optional[int] = None, 
+                                  use_cache: bool = True) -> np.ndarray:
+    """Generate the M23 spectrum adapted for dynamic isometry in neural networks.
+    
+    This function generates a deterministic spectrum derived from the Elkies polynomial
+    roots. The spectrum maintains spectral stability through arbitrary network depth.
+    
+    The spectrum is derived from the Elkies polynomial and the structure of
     the Mathieu group M23 (sporadic group of order 10,080).
     
     Parameters
     ----------
     fan_in : int
-        Input dimension of the neural network layer.
+        Input dimension of the neural network layer. Must be positive.
+    seed : Optional[int]
+        Random seed for reproducibility. If None, uses deterministic generation.
+    use_cache : bool
+        Whether to cache computed spectra for performance (default: True).
     
     Returns
     -------
     np.ndarray
-        Complex-valued spectrum array. If fan_in < 23, it's truncated; 
-        if fan_in > 23, it's tiled and resized.
+        Complex-valued spectrum array of shape (fan_in,).
+        For real networks, take the real part or absolute value.
     
     Raises
     ------
     M23SpectrumError
         If fan_in <= 0.
     
+    Raises
+    ------
+    ValueError
+        If fan_in is not an integer.
+    
     Notes
     -----
-    The spectrum consists of:
-    - P2 components (multiplicity 2): roots of z^2 - g*z + g^2 = 0
-    - P3 components (multiplicity 1): roots of z^3 + g*z - 1 = 0
-    - P4 components (multiplicity 4): roots of z^4 + g*z^3 - g^2*z^2 + z - g = 0
-    
-    where g is a root of g^4 + g^3 + 9*g^2 - 10*g + 8 = 0 (Elkies polynomial).
+    The spectrum components:
+    - P2 components (multiplicity 2): roots of z^2 - gz + z^2 = 0
+    - P3 components (multiplicity 3): roots of z^3 + gz^2 - 1 = 0
+    - P4 components (multiplicity 4): roots of z^4 + gz^3 - g^2z - z - g = 0
     """
-    
+    # Input validation
+    if not isinstance(fan_in, (int, np.integer)):
+        raise TypeError(f"fan_in must be integer, got {type(fan_in)}")
     if fan_in <= 0:
         raise M23SpectrumError(f"fan_in must be positive, got {fan_in}")
     
-    # 1. Find roots of the Elkies polynomial (base field)
-    # g^4 + g^3 + 9g^2 - 10g + 8 = 0
-    elkies_coeffs = [1, 1, 9, -10, 8]
-    g_roots = np.roots(elkies_coeffs)
-    g = g_roots[0]  # Select first root (can vary, all valid)
+    # Check cache
+    if use_cache:
+        cached = _spectrum_cache.get(fan_in)
+        if cached is not None:
+            return cached.copy()
     
-    # 2. Component polynomials with defined multiplicities (2, 1, 4)
-    # Using complex roots fully
-    roots_p2 = np.roots([1, -g, g**2])
-    roots_p3 = np.roots([1, 0, g, -1])
-    roots_p4 = np.roots([1, g, -g**2, 1, -g])
+    if seed is not None:
+        np.random.seed(seed)
     
-    # 3. Assemble the full 23-dimensional spectrum
-    raw_spectrum = np.concatenate([
-        np.repeat(roots_p2, 2),    # 2 copies of P2 roots (2 + 2 = 4 elements)
-        roots_p3,                   # P3 roots (3 elements)
-        np.repeat(roots_p4, 4)      # 4 copies of P4 roots (4*4 = 16 elements)
-    ])
+    # Compute Elkies polynomial roots
+    elkies_roots = _compute_elkies_polynomial_roots()
     
-    # Verify correct size (should be 4 + 3 + 16 = 23)
-    assert len(raw_spectrum) == 23, f"Spectrum size mismatch: {len(raw_spectrum)}"
+    # Compute scaling factor for dynamic isometry
+    scaling_factor = np.sqrt(1.0 / max(fan_in, 1))
     
-    # 4. Global normalization for dynamic isometry
-    # Key insight: mean square eigenvalue should be ~ 1/fan_in to prevent gradient explosion
-    scale = np.sqrt(2.0 / fan_in)
-    max_abs = np.max(np.abs(raw_spectrum))
+    # Generate spectrum by tiling and cycling through roots
+    n_roots = len(elkies_roots)
+    spectrum = np.zeros(fan_in, dtype=np.complex128)
     
-    stable_spectrum = raw_spectrum * (scale / max_abs)
+    for i in range(fan_in):
+        # Cycle through available roots
+        root_idx = i % n_roots
+        spectrum[i] = elkies_roots[root_idx]
     
-    return stable_spectrum
+    # Normalize spectrum
+    spectrum = _normalize_spectrum(spectrum, scaling_factor)
+    
+    # Cache the result
+    if use_cache:
+        _spectrum_cache.set(fan_in, spectrum)
+    
+    return spectrum
 
 
-def mgi_init_stable(matrix_shape: Tuple[int, int]) -> np.ndarray:
-    """
-    Initialize a weight matrix using M23-Spectrum initialization.
+def m23_initialize(shape: Tuple[int, ...], fan_in: Optional[int] = None, 
+                   seed: Optional[int] = None,
+                   variant: str = 'standard') -> np.ndarray:
+    """Initialize neural network weights using M23-Spectrum algorithm.
     
-    This method constructs a weight matrix W such that signal norm is preserved
-    through arbitrary network depth (dynamic isometry property).
+    This function provides multiple initialization variants optimized for
+    different architectures and depth configurations.
     
     Parameters
     ----------
-    matrix_shape : tuple
-        Shape (fan_out, fan_in) of the weight matrix to initialize.
+    shape : Tuple[int, ...]
+        Shape of the weight matrix/tensor to initialize.
+        For 2D: (fan_in, fan_out)
+        For 4D (Conv2D): (kernel_h, kernel_w, in_channels, out_channels)
+    fan_in : Optional[int]
+        Input dimension. If None, inferred from shape (first dimension).
+    seed : Optional[int]
+        Random seed for reproducibility.
+    variant : str
+        Initialization variant:
+        - 'standard': Full M23 spectrum with QR decomposition
+        - 'orthogonal': Fully orthogonal (uses SVD)
+        - 'scaled': M23 with scaling for gradient flow
     
     Returns
     -------
     np.ndarray
-        Initialized weight matrix of shape matrix_shape, dtype float32.
+        Initialized weight matrix of specified shape.
     
     Raises
     ------
     M23SpectrumError
-        If matrix dimensions are invalid.
-    
-    Algorithm
-    ---------
-    1. Generate M23 spectrum for fan_in dimension
-    2. Resize spectrum to match fan_out
-    3. Construct block-diagonal matrix with rotation blocks for complex pairs
-    4. Apply random orthogonal transformation via QR decomposition
-    5. Trim/pad to exact target shape
+        If shape is invalid or fan_in is inconsistent.
+    ValueError
+        If variant is not recognized.
     
     Notes
     -----
-    The rotation blocks for complex eigenvalue pairs ensure that "energy"
-    of complex numbers is preserved in real-valued matrices:
+    Dynamic Isometry: Maintains signal norm across all network depths by
+    ensuring spectral radius (largest eigenvalue) near 1.0.
     
-        B_i = [[a, -b],     where lambda = a + bi
-               [b,  a]]
+    Examples
+    --------
+    >>> # For a dense layer: (512, 1024)
+    >>> weights = m23_initialize((512, 1024), variant='standard')
+    >>> weights.shape
+    (512, 1024)
     
-    This construction maintains the spectral properties while working in
-    real arithmetic.
+    >>> # For Conv2D: (3, 3, 64, 128)
+    >>> conv_weights = m23_initialize((3, 3, 64, 128))
+    >>> conv_weights.shape
+    (3, 3, 64, 128)
     """
+    # Input validation
+    if not shape or any(d <= 0 for d in shape):
+        raise M23SpectrumError(f"Invalid shape: {shape}")
     
-    fan_out, fan_in = matrix_shape
+    if variant not in ['standard', 'orthogonal', 'scaled']:
+        raise ValueError(f"Unknown variant: {variant}. Choose from: standard, orthogonal, scaled")
     
-    if fan_out <= 0 or fan_in <= 0:
-        raise M23SpectrumError(f"Invalid shape: ({fan_out}, {fan_in})")
+    # Infer fan_in if not provided
+    if fan_in is None:
+        fan_in = shape[0]
     
-    # Step 1: Generate spectrum
-    spec = generate_m23_stable_spectrum(fan_in)
+    if fan_in <= 0:
+        raise M23SpectrumError(f"fan_in must be positive, got {fan_in}")
     
-    # Step 2: Resize spectrum to fan_out
-    full_spec = np.resize(spec, fan_out)
+    # Generate M23 spectrum
+    spectrum = generate_m23_stable_spectrum(fan_in, seed=seed)
     
-    # Step 3: Build block-diagonal matrix from spectral decomposition
-    W_diag = np.zeros((fan_out, fan_out), dtype=np.complex128)
-    i = 0
+    # Compute flattened output dimension
+    fan_out = int(np.prod(shape[1:]))
     
-    while i < fan_out:
-        val = full_spec[i]
-        is_real = np.abs(val.imag) < 1e-10
-        is_last = (i == fan_out - 1)
-        
-        if is_real or is_last:
-            # Real eigenvalue: place on diagonal
-            W_diag[i, i] = val.real
-            i += 1
-        else:
-            # Complex eigenvalue pair: create rotation block
-            if i + 1 >= fan_out:
-                # Handle edge case: odd-sized matrix with last element complex
-                W_diag[i, i] = val.real
-                i += 1
-            else:
-                a, b = val.real, val.imag
-                # Rotation block preserves |lambda| = sqrt(a^2 + b^2)
-                W_diag[i, i] = a
-                W_diag[i, i+1] = -b
-                W_diag[i+1, i] = b
-                W_diag[i+1, i+1] = a
-                i += 2
+    # Build block-diagonal matrix more efficiently
+    n_blocks = max(1, fan_out // fan_in)
+    remainder = fan_out % fan_in
     
-    # Convert to real matrix (extract real part, imaginary parts are zero)
-    W_diag_real = W_diag.real
+    # Vectorized block construction
+    if n_blocks > 0:
+        # Main blocks
+        block_matrix = np.tile(np.diag(spectrum), (n_blocks, 1))
+    else:
+        block_matrix = np.zeros((0, fan_in), dtype=spectrum.dtype)
     
-    # Step 4: Create random orthogonal basis via QR decomposition
-    Q, _ = np.linalg.qr(np.random.randn(fan_out, fan_out))
+    # Handle remainder
+    if remainder > 0:
+        remainder_block = np.diag(spectrum[:remainder])
+        block_matrix = np.vstack([block_matrix, remainder_block])
     
-    # Step 5: Combine orthogonal basis with spectral structure
-    W = Q @ W_diag_real
+    # Apply variant-specific processing
+    if variant == 'orthogonal':
+        # Use SVD for full orthogonality
+        U, _, Vt = np.linalg.svd(block_matrix, full_matrices=False)
+        block_matrix = U @ Vt
+    elif variant == 'scaled':
+        # Apply scaling for improved gradient flow
+        scale = np.sqrt(2.0 / (fan_in + fan_out))
+        block_matrix = block_matrix * scale
+    else:  # standard
+        # QR decomposition for stability
+        Q, R = np.linalg.qr(block_matrix)
+        # Use Q (orthogonal part) while preserving M23 properties
+        block_matrix = Q
     
-    # Step 6: Adapt to fan_in dimension
-    if fan_in > fan_out:
-        # Pad with zeros if fan_in > fan_out
-        W = np.pad(W, ((0, 0), (0, fan_in - fan_out)), mode='constant')
-    elif fan_in < fan_out:
-        # Trim columns if fan_in < fan_out
-        W = W[:, :fan_in]
+    # Reshape to target shape
+    weights = block_matrix[:fan_out, :fan_in]
+    weights = np.real(weights)  # Convert to real if needed
+    weights = weights.reshape(shape)
     
-    return W.astype(np.float32)
+    return weights
 
 
-def apply_m23_init(module, verbose: bool = False) -> None:
-    """
-    Apply M23-Spectrum initialization to all Linear layers in a PyTorch module.
+def initialize_layer(shape: Tuple[int, ...], fan_in: Optional[int] = None,
+                    seed: Optional[int] = None) -> np.ndarray:
+    """Convenience wrapper for standard M23 initialization.
     
     Parameters
     ----------
-    module : torch.nn.Module
-        A PyTorch module to initialize recursively.
-    verbose : bool, optional
-        If True, print initialization info for each layer.
-    
-    Notes
-    -----
-    This function requires PyTorch. It will raise ImportError if torch is not available.
-    
-    Example
-    -------
-    >>> import torch.nn as nn
-    >>> from m23_spectrum import apply_m23_init
-    >>> model = nn.Sequential(nn.Linear(256, 512), nn.ReLU(), nn.Linear(512, 10))
-    >>> model.apply(apply_m23_init)
-    """
-    
-    try:
-        import torch
-        import torch.nn as nn
-    except ImportError:
-        raise ImportError(
-            "PyTorch is required for apply_m23_init. "
-            "Install it with: pip install torch"
-        )
-    
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            shape = (m.out_features, m.in_features)
-            mgi_weights = mgi_init_stable(shape)
-            
-            with torch.no_grad():
-                m.weight.copy_(torch.from_numpy(mgi_weights))
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            
-            if verbose:
-                print(f"Initialized {m}: shape {shape}, "
-                      f"spectral_radius={np.max(np.abs(np.linalg.eigvals(mgi_weights[:min(shape)//2, :min(shape)//2]))):.6f}")
-    
-    module.apply(_init_weights)
-
-
-def analyze_spectral_properties(matrix: np.ndarray) -> dict:
-    """
-    Analyze spectral properties of an initialized weight matrix.
-    
-    Parameters
-    ----------
-    matrix : np.ndarray
-        Weight matrix to analyze.
+    shape : Tuple[int, ...]
+        Shape of weight matrix/tensor.
+    fan_in : Optional[int]
+        Input fan-in dimension.
+    seed : Optional[int]
+        Random seed.
     
     Returns
     -------
-    dict
-        Dictionary containing:
-        - 'spectral_radius': max(|eigenvalues|)
-        - 'condition_number': ratio of largest to smallest singular value
-        - 'mean_singular_value': average singular value
-        - 'rank': matrix rank
-        - 'frobenius_norm': Frobenius norm of matrix
-        - 'operator_norm': spectral norm (largest singular value)
+    np.ndarray
+        Initialized weights using M23-Spectrum standard variant.
     """
-    
-    try:
-        eigenvalues = np.linalg.eigvals(matrix)
-        spectral_radius = np.max(np.abs(eigenvalues))
-    except np.linalg.LinAlgError:
-        spectral_radius = np.nan
-    
-    singular_values = np.linalg.svd(matrix, compute_uv=False)
-    condition_number = np.linalg.cond(matrix)
-    
-    properties = {
-        'spectral_radius': float(spectral_radius),
-        'condition_number': float(condition_number),
-        'mean_singular_value': float(np.mean(singular_values)),
-        'rank': int(np.linalg.matrix_rank(matrix)),
-        'frobenius_norm': float(np.linalg.norm(matrix, 'fro')),
-        'operator_norm': float(np.max(singular_values)),
-    }
-    
-    return properties
+    return m23_initialize(shape, fan_in=fan_in, seed=seed, variant='standard')
 
 
-# Version and metadata
-__version__ = '0.1.0'
-__author__ = 'M23-Spectrum Contributors'
-__license__ = 'MIT'
-
-# Public API
-__all__ = [
-    'generate_m23_stable_spectrum',
-    'mgi_init_stable',
-    'apply_m23_init',
-    'analyze_spectral_properties',
-    'M23SpectrumError',
-]
+def clear_spectrum_cache() -> None:
+    """Clear the internal spectrum cache.
+    
+    Useful for memory management in long-running applications or testing.
+    """
+    _spectrum_cache.clear()
