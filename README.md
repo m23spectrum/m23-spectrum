@@ -423,9 +423,9 @@ If you use M23-Spectrum in your research, please cite:
 ```bibtex
 @software{m23spectrum2026,
   title={M23-Spectrum: Algebraic Weight Initialization for Deep Neural Networks},
-  author={[Your Name]},
+  author={m23spectrum},
   year={2026},
-  url={https://github.com/yourusername/m23-spectrum},
+  url={https://github.com/m23spectrum/m23-spectrum},
   license={MIT}
 }
 ```
