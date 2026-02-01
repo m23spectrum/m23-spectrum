@@ -495,6 +495,6 @@ This work builds upon foundational research in:
 
 ---
 
-**Status**: ⚠️ Alpha Release (v0.1.0) - API may change before v1.0  
+**Status**: ⚠️ Alpha Release (v0.2.0) - API may change before v1.0  
 **Last Updated**: January 31, 2026  
 **Tested on**: Python 3.8, 3.9, 3.10, 3.11
