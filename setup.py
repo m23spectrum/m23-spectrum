@@ -14,7 +14,7 @@ setup(
     description="Algebraic weight initialization for deep neural networks using M23 spectrum",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/m23-spectrum",
+    url="https://github.com/m23spectrum/m23-spectrum",
     packages=find_packages(),
     py_modules=["m23_spectrum"],
     classifiers=[
@@ -47,9 +47,9 @@ setup(
         ],
     },
     project_urls={
-        "Bug Tracker": "https://github.com/yourusername/m23-spectrum/issues",
-        "Documentation": "https://github.com/yourusername/m23-spectrum",
-        "Source Code": "https://github.com/yourusername/m23-spectrum",
+        "Bug Tracker": "https://github.com/m23spectrum/m23-spectrum/issues",
+        "Documentation": "https://github.com/m23spectrum/m23-spectrum",
+        "Source Code": "https://github.com/m23spectrum/m23-spectrum",
     },
     keywords=[
         "neural-networks",
