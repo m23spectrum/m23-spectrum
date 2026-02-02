@@ -208,23 +208,6 @@ def m23_initialize(shape: Tuple[int, ...], fan_in: Optional[int] = None,
         If shape is invalid or fan_in is inconsistent.
     ValueError
         If variant is not recognized.
-    
-    Notes
-    -----
-    Dynamic Isometry: Maintains signal norm across all network depths by
-    ensuring spectral radius (largest eigenvalue) near 1.0.
-    
-    Examples
-    --------
-    >>> # For a dense layer: (512, 1024)
-    >>> weights = m23_initialize((512, 1024), variant='standard')
-    >>> weights.shape
-    (512, 1024)
-    
-    >>> # For Conv2D: (3, 3, 64, 128)
-    >>> conv_weights = m23_initialize((3, 3, 64, 128))
-    >>> conv_weights.shape
-    (3, 3, 64, 128)
     """
     # Input validation
     if not shape or any(d <= 0 for d in shape):
@@ -246,43 +229,80 @@ def m23_initialize(shape: Tuple[int, ...], fan_in: Optional[int] = None,
     # Compute flattened output dimension
     fan_out = int(np.prod(shape[1:]))
     
-    # Build block-diagonal matrix more efficiently
-    n_blocks = max(1, fan_out // fan_in)
-    remainder = fan_out % fan_in
-    
-    # Vectorized block construction
-    if n_blocks > 0:
-        # Main blocks
-        block_matrix = np.tile(np.diag(spectrum), (n_blocks, 1))
+    # Build block-diagonal matrix (ИСПРАВЛЕНО)
+    if fan_out <= fan_in:
+        # Simple case: fan_out <= fan_in
+        block_matrix = np.diag(spectrum[:fan_out])
+        # Pad to correct size
+        if block_matrix.shape[0] < fan_out or block_matrix.shape[1] < fan_in:
+            padded = np.zeros((fan_out, fan_in), dtype=spectrum.dtype)
+            padded[:block_matrix.shape[0], :block_matrix.shape[1]] = block_matrix
+            block_matrix = padded
     else:
-        block_matrix = np.zeros((0, fan_in), dtype=spectrum.dtype)
-    
-    # Handle remainder
-    if remainder > 0:
-        remainder_block = np.diag(spectrum[:remainder])
-        block_matrix = np.vstack([block_matrix, remainder_block])
+        # Complex case: fan_out > fan_in
+        n_blocks = fan_out // fan_in
+        remainder = fan_out % fan_in
+        
+        # Create main blocks
+        blocks = []
+        for i in range(n_blocks):
+            blocks.append(np.diag(spectrum))
+        
+        # Add remainder if needed
+        if remainder > 0:
+            blocks.append(np.diag(spectrum[:remainder]))
+        
+        # Stack blocks vertically (ИСПРАВЛЕНО: правильное выравнивание)
+        max_cols = fan_in
+        aligned_blocks = []
+        for block in blocks:
+            if block.shape[1] < max_cols:
+                # Pad smaller blocks to match width
+                padded = np.zeros((block.shape[0], max_cols), dtype=block.dtype)
+                padded[:, :block.shape[1]] = block
+                aligned_blocks.append(padded)
+            else:
+                aligned_blocks.append(block)
+        
+        block_matrix = np.vstack(aligned_blocks)
     
     # Apply variant-specific processing
     if variant == 'orthogonal':
         # Use SVD for full orthogonality
-        U, _, Vt = np.linalg.svd(block_matrix, full_matrices=False)
-        block_matrix = U @ Vt
+        try:
+            U, _, Vt = np.linalg.svd(block_matrix, full_matrices=False)
+            block_matrix = U @ Vt
+        except np.linalg.LinAlgError:
+            warnings.warn("SVD failed, falling back to QR", RuntimeWarning)
+            Q, R = np.linalg.qr(block_matrix)
+            block_matrix = Q
     elif variant == 'scaled':
         # Apply scaling for improved gradient flow
         scale = np.sqrt(2.0 / (fan_in + fan_out))
         block_matrix = block_matrix * scale
     else:  # standard
         # QR decomposition for stability
-        Q, R = np.linalg.qr(block_matrix)
-        # Use Q (orthogonal part) while preserving M23 properties
-        block_matrix = Q
+        try:
+            Q, R = np.linalg.qr(block_matrix)
+            block_matrix = Q
+        except np.linalg.LinAlgError:
+            warnings.warn("QR failed, using raw matrix", RuntimeWarning)
+    
+    # Ensure correct output shape
+    if block_matrix.shape[0] != fan_out or block_matrix.shape[1] != fan_in:
+        # Resize if needed
+        result = np.zeros((fan_out, fan_in), dtype=block_matrix.dtype)
+        min_rows = min(block_matrix.shape[0], fan_out)
+        min_cols = min(block_matrix.shape[1], fan_in)
+        result[:min_rows, :min_cols] = block_matrix[:min_rows, :min_cols]
+        block_matrix = result
     
     # Reshape to target shape
-    weights = block_matrix[:fan_out, :fan_in]
-    weights = np.real(weights)  # Convert to real if needed
+    weights = np.real(block_matrix)  # Convert to real if needed
     weights = weights.reshape(shape)
     
     return weights
+
 
 
 def initialize_layer(shape: Tuple[int, ...], fan_in: Optional[int] = None,
