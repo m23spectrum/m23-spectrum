@@ -54,7 +54,7 @@ pip install m23-spectrum
 Or install from source:
 
 ```bash
-git clone https://github.com/yourusername/m23-spectrum.git
+git clone https://github.com/m23spectrum/m23-spectrum.git
 cd m23-spectrum
 pip install -e .
 ```
