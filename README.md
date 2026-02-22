@@ -10,7 +10,7 @@
 M23-Spectrum uses algebraic weight initialization based on the Mathieu group M23 and dynamic isometry principles, providing:
 - **2.8× faster convergence** compared to standard initialization
 - **29-32 dB PSNR** on standard benchmarks
-- **Real-time inference** (<20ms on RTX 4070 Ti)
+- **Real-time inference** (<20ms on RTX 4070 Ti Super)
 - **Lightweight models** (~900K parameters)
 
 ---
@@ -254,10 +254,10 @@ MIT License - see [LICENSE](LICENSE)
 ## 📖 Citation
 
 ```bibtex
-@software{m23spectrum2025,
+@software{m23spectrum2026,
   title   = {M23-Spectrum: Algebraic Weight Initialization for Super-Resolution},
   author  = {M23-Spectrum Team},
-  year    = {2025},
+  year    = {2026},
   url     = {https://github.com/m23spectrum/m23-spectrum},
   note    = {v1.0.0}
 }
