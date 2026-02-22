@@ -16,7 +16,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://github.com/m23spectrum/m23-spectrum",
     packages=find_packages(),
-    py_modules=["m23_spectrum"],
+    py_modules=["m23_spectrum", "m23_sr_engine", "train_div2k", "example_basic", "benchmark", "visualize_spectrum"],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",

@@ -1,0 +1,133 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "m23-spectrum"
+version = "1.0.0"
+description = "Professional Super-Resolution Library with M23-Spectrum Weight Initialization"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "M23-Spectrum Team", email = "contact@m23spectrum.dev"}
+]
+maintainers = [
+    {name = "M23-Spectrum Team", email = "contact@m23spectrum.dev"}
+]
+keywords = [
+    "super-resolution",
+    "image-enhancement",
+    "deep-learning",
+    "neural-networks",
+    "weight-initialization",
+    "mathieu-groups",
+    "pytorch",
+    "computer-vision",
+    "real-time",
+    "upscaling",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.19.0",
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+    "pillow>=8.0.0",
+]
+
+[project.optional-dependencies]
+full = [
+    "lpips>=0.1.4",
+    "gradio>=4.0.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0",
+    "types-setuptools",
+]
+all = [
+    "m23-spectrum[full,dev]",
+]
+
+[project.scripts]
+m23-upscale = "m23_spectrum.cli:main_upscale"
+m23-benchmark = "m23_spectrum.cli:main_benchmark"
+m23-info = "m23_spectrum.cli:main_info"
+
+[project.gui-scripts]
+m23-demo = "m23_spectrum.demo:main"
+
+[project.urls]
+Homepage = "https://m23spectrum.dev"
+Documentation = "https://m23spectrum.dev/docs"
+Repository = "https://github.com/m23spectrum/m23-spectrum"
+Issues = "https://github.com/m23spectrum/m23-spectrum/issues"
+Changelog = "https://github.com/m23spectrum/m23-spectrum/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short --strict-markers"
+markers = [
+    "slow: marks tests as slow",
+    "gpu: marks tests requiring GPU",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+
+[[tool.mypy.overrides]]
+module = ["torch.*", "PIL.*", "torchvision.*", "lpips.*", "gradio.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["src/m23_spectrum"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

@@ -1,0 +1,17 @@
+# Core dependencies
+numpy>=1.19.0
+
+# PyTorch support (optional, install with: pip install m23-spectrum[torch])
+# torch>=1.9.0
+
+# Development dependencies (install with: pip install m23-spectrum[dev])
+# pytest>=7.0
+# pytest-cov>=4.0
+# black>=23.0
+# ruff>=0.1.0
+# mypy>=1.0
+
+# Training dependencies (for train_div2k.py)
+# torch>=1.9.0
+# torchvision>=0.10.0
+# Pillow>=8.0.0
