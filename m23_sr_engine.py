@@ -112,12 +112,11 @@ def m23_init_tensor(
 
     spec = m23_spectrum(fan_in, seed=seed)
 
-    # Строим матрицу (fan_out × fan_in) с фазовой структурой
-    mat = np.zeros((fan_out, fan_in), dtype=np.complex128)
-    for col in range(fan_in):
-        phase = np.exp(1j * 2 * np.pi * col / fan_in)
-        for row in range(fan_out):
-            mat[row, col] = spec[(row + col) % len(spec)] * (phase ** col)
+    # Строим матрицу (fan_out × fan_in) с фазовой структурой (векторизованно)
+    idx_mat = (np.arange(fan_out)[:, np.newaxis] + np.arange(fan_in)[np.newaxis, :]) % len(spec)
+    mat = spec[idx_mat]
+    phases = np.exp(1j * 2 * np.pi * (np.arange(fan_in) ** 2) / fan_in)
+    mat = mat * phases[np.newaxis, :]
 
     if variant == "orthogonal":
         try:
@@ -309,19 +308,76 @@ if TORCH_AVAILABLE:
             return self.weight * (amp_loss + 0.1 * phase_loss)
 
 
-    class CombinedSRLoss(nn.Module):
+    class SSIMLoss(nn.Module):
         """
-        L = Charbonnier + λ_freq * FrequencyLoss
-        Рекомендуемые значения: freq_weight=0.05
+        SSIM Loss: Structural Similarity Index Measure.
+        Штрафует за искажение структурных и текстурных деталей.
+        Обеспечивает резкость и высокое качество PSNR/SSIM на валидации.
         """
 
-        def __init__(self, freq_weight: float = 0.05):
+        def __init__(self, window_size: int = 11, size_average: bool = True):
+            super().__init__()
+            self.window_size = window_size
+            self.size_average = size_average
+            self.channel = 3
+            self.register_buffer("window", self._create_window(window_size, self.channel))
+
+        def _gaussian(self, size: int, sigma: float) -> torch.Tensor:
+            coords = torch.arange(size, dtype=torch.float32) - size // 2
+            g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+            return g / g.sum()
+
+        def _create_window(self, size: int, channel: int) -> torch.Tensor:
+            _1D_window = self._gaussian(size, 1.5).unsqueeze(1)
+            _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+            window = _2D_window.expand(channel, 1, size, size).contiguous()
+            return window
+
+        def forward(self, img1: torch.Tensor, img2: torch.Tensor) -> torch.Tensor:
+            (_, channel, _, _) = img1.size()
+
+            if channel == self.channel and hasattr(self, "window") and self.window.data.type() == img1.data.type():
+                window = self.window
+            else:
+                window = self._create_window(self.window_size, channel).to(img1.device).type(img1.dtype)
+
+            mu1 = F.conv2d(img1, window, padding=self.window_size//2, groups=channel)
+            mu2 = F.conv2d(img2, window, padding=self.window_size//2, groups=channel)
+
+            mu1_sq = mu1.pow(2)
+            mu2_sq = mu2.pow(2)
+            mu1_mu2 = mu1 * mu2
+
+            sigma1_sq = F.conv2d(img1 * img1, window, padding=self.window_size//2, groups=channel) - mu1_sq
+            sigma2_sq = F.conv2d(img2 * img2, window, padding=self.window_size//2, groups=channel) - mu2_sq
+            sigma12 = F.conv2d(img1 * img2, window, padding=self.window_size//2, groups=channel) - mu1_mu2
+
+            C1 = 0.01 ** 2
+            C2 = 0.03 ** 2
+
+            ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+
+            if self.size_average:
+                return 1.0 - ssim_map.mean()
+            else:
+                return 1.0 - ssim_map.mean(1).mean(1).mean(1)
+
+
+    class CombinedSRLoss(nn.Module):
+        """
+        L = Charbonnier + λ_freq * FrequencyLoss + λ_ssim * SSIMLoss
+        Рекомендуемые значения: freq_weight=0.05, ssim_weight=0.1
+        """
+
+        def __init__(self, freq_weight: float = 0.05, ssim_weight: float = 0.1):
             super().__init__()
             self.charb = CharbonnierLoss(eps=1e-3)
             self.freq  = FrequencyLoss(loss_weight=freq_weight)
+            self.ssim  = SSIMLoss(window_size=11)
+            self.ssim_weight = ssim_weight
 
         def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-            return self.charb(pred, target) + self.freq(pred, target)
+            return self.charb(pred, target) + self.freq(pred, target) + self.ssim_weight * self.ssim(pred, target)
 
 
     # ══════════════════════════════════════════════════════════
