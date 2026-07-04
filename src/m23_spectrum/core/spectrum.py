@@ -186,16 +186,11 @@ def m23_init_tensor(
 
     # Generate spectrum
     spectrum = m23_spectrum(fan_in, seed=seed)
-
-    # Build weight matrix with phase structure
-    mat = np.zeros((fan_out, fan_in), dtype=np.complex128)
-
-    for col in range(fan_in):
-        phase = np.exp(1j * 2 * np.pi * col / fan_in)
-        for row in range(fan_out):
-            idx = (row + col) % len(spectrum)
-            mat[row, col] = spectrum[idx] * (phase ** col)
-
+    # Build weight matrix with phase structure (vectorized)
+    idx_mat = (np.arange(fan_out)[:, np.newaxis] + np.arange(fan_in)[np.newaxis, :]) % len(spectrum)
+    mat = spectrum[idx_mat]
+    phases = np.exp(1j * 2 * np.pi * (np.arange(fan_in) ** 2) / fan_in)
+    mat = mat * phases[np.newaxis, :]
     # Apply variant-specific processing
     if variant == "orthogonal":
         try:
