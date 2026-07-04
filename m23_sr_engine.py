@@ -384,6 +384,48 @@ if TORCH_AVAILABLE:
     # 5. WARM-START MULTI-STAGE SCHEDULER
     # ══════════════════════════════════════════════════════════
 
+    class ModelEMA:
+        """
+        Exponential Moving Average of model weights.
+
+        Стандартная техника 2025+ для SR: EMA-модель используется
+        только для инференса/валидации, давая +0.05–0.15 dB PSNR бесплатно.
+
+        Args:
+            model:  Тренируемая модель.
+            decay:  Коэффициент сглаживания (обычно 0.999).
+        """
+
+        def __init__(self, model: nn.Module, decay: float = 0.999):
+            self.decay = decay
+            # Храним EMA-веса отдельно от тренируемых
+            self.shadow: Dict[str, torch.Tensor] = {}
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    self.shadow[name] = param.data.clone().float()
+
+        @torch.no_grad()
+        def update(self, model: nn.Module):
+            """Вызывать после каждого optimizer.step()."""
+            for name, param in model.named_parameters():
+                if param.requires_grad and name in self.shadow:
+                    self.shadow[name].mul_(self.decay).add_(
+                        param.data.float(), alpha=1.0 - self.decay
+                    )
+
+        def apply_to(self, model: nn.Module):
+            """Копирует EMA-веса в модель (для валидации/инференса)."""
+            for name, param in model.named_parameters():
+                if name in self.shadow:
+                    param.data.copy_(self.shadow[name].to(param.dtype))
+
+        def restore(self, model: nn.Module, backup: Dict[str, torch.Tensor]):
+            """Восстанавливает оригинальные веса после валидации."""
+            for name, param in model.named_parameters():
+                if name in backup:
+                    param.data.copy_(backup[name])
+
+
     class WarmStartScheduler:
         """
         Multi-stage warm-start стратегия из RLFN paper.
@@ -410,10 +452,66 @@ if TORCH_AVAILABLE:
             self.current_iter += 1
             stage = self.stages[self.current_stage]
             if self.current_iter >= stage["iters"]:
-                self.current_stage = min(self.current_stage + 1, len(self.stages) - 1)
-                if self.current_stage < len(self.stages):
+                # BUG FIX: не обновлять стадию если уже на последней
+                next_stage = self.current_stage + 1
+                if next_stage < len(self.stages):
+                    self.current_stage = next_stage
                     self._set_lr(self.stages[self.current_stage]["lr"])
                 self.current_iter = 0
+
+        @property
+        def current_lr(self) -> float:
+            return self.optimizer.param_groups[0]["lr"]
+
+
+    class CosineWarmStartScheduler:
+        """
+        CosineAnnealingWarmRestarts — современный шедулер (лучше ступенчатого).
+
+        Периодически «перезапускает» LR по косинусу, что помогает
+        выбираться из локальных минимумов. Рекомендуется для длинных тренингов.
+
+        Args:
+            optimizer: Оптимизатор.
+            lr_max:    Максимальный LR в начале цикла.
+            lr_min:    Минимальный LR в конце цикла.
+            T0:        Длина первого цикла в итерациях.
+            T_mult:    Множитель длины следующих циклов (1 = одинаковые).
+        """
+
+        def __init__(
+            self,
+            optimizer,
+            lr_max:  float = 2e-4,
+            lr_min:  float = 1e-6,
+            T0:      int   = 100_000,
+            T_mult:  int   = 2,
+        ):
+            self.optimizer = optimizer
+            self.lr_max    = lr_max
+            self.lr_min    = lr_min
+            self.T0        = T0
+            self.T_mult    = T_mult
+            self._iter     = 0
+            self._cycle    = 0
+            self._T_cur    = T0
+            self._set_lr(lr_max)
+
+        def _set_lr(self, lr: float):
+            for pg in self.optimizer.param_groups:
+                pg["lr"] = lr
+
+        def step(self):
+            import math
+            self._iter += 1
+            if self._iter >= self._T_cur:
+                self._cycle += 1
+                self._iter   = 0
+                self._T_cur  = self.T0 * (self.T_mult ** self._cycle)
+            # Cosine decay
+            cos_val = math.cos(math.pi * self._iter / self._T_cur)
+            lr = self.lr_min + 0.5 * (self.lr_max - self.lr_min) * (1 + cos_val)
+            self._set_lr(lr)
 
         @property
         def current_lr(self) -> float:
@@ -429,16 +527,29 @@ if TORCH_AVAILABLE:
         Полный тренировочный цикл:
         - AMP (Automatic Mixed Precision) для RTX 4070 Ti Super
         - Gradient clipping (max_norm=1.0)
-        - Warm-start scheduler
+        - Warm-start / CosineWarmRestart scheduler
+        - EMA (Exponential Moving Average) для лучшего PSNR на валидации
         - PSNR мониторинг
+
+        Args:
+            model:          Модель M23_RLFN.
+            device:         'cuda' или 'cpu'.
+            freq_weight:    Вес FrequencyLoss.
+            stages:         Стадии для WarmStartScheduler (если None — дефолт).
+            use_cosine:     Использовать CosineWarmStartScheduler вместо ступенчатого.
+            use_ema:        Включить EMA (рекомендуется, +0.05–0.15 dB).
+            ema_decay:      Коэффициент EMA (default 0.999).
         """
 
         def __init__(
             self,
             model:       "M23_RLFN",
-            device:      str = "cuda",
+            device:      str   = "cuda",
             freq_weight: float = 0.05,
             stages:      Optional[List[Dict]] = None,
+            use_cosine:  bool  = True,
+            use_ema:     bool  = True,
+            ema_decay:   float = 0.999,
         ):
             self.model     = model.to(device)
             self.device    = device
@@ -447,14 +558,25 @@ if TORCH_AVAILABLE:
                 model.parameters(), lr=2e-4,
                 betas=(0.9, 0.999), eps=1e-8,
             )
-            if stages is None:
-                stages = [
-                    {"lr": 2e-4, "iters": 100_000},
-                    {"lr": 1e-4, "iters": 100_000},
-                    {"lr": 5e-5, "iters": 100_000},
-                ]
-            self.scheduler = WarmStartScheduler(self.optimizer, stages)
-            self.scaler    = torch.amp.GradScaler(device) if device == "cuda" else None
+            # Scheduler
+            if use_cosine:
+                self.scheduler = CosineWarmStartScheduler(
+                    self.optimizer, lr_max=2e-4, lr_min=1e-6,
+                    T0=100_000, T_mult=2,
+                )
+            else:
+                if stages is None:
+                    stages = [
+                        {"lr": 2e-4, "iters": 100_000},
+                        {"lr": 1e-4, "iters": 100_000},
+                        {"lr": 5e-5, "iters": 100_000},
+                    ]
+                self.scheduler = WarmStartScheduler(self.optimizer, stages)
+
+            self.scaler = torch.amp.GradScaler(device) if device == "cuda" else None
+
+            # EMA
+            self.ema = ModelEMA(model, decay=ema_decay) if use_ema else None
 
         @staticmethod
         def calc_psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
@@ -486,6 +608,10 @@ if TORCH_AVAILABLE:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
+            # Обновляем EMA после каждого шага оптимизатора
+            if self.ema is not None:
+                self.ema.update(self.model)
+
             self.scheduler.step()
             return {
                 "loss": loss.item(),
@@ -495,7 +621,19 @@ if TORCH_AVAILABLE:
 
         @torch.no_grad()
         def evaluate(self, val_loader) -> float:
+            """
+            Валидация с EMA-моделью (если включена) — даёт более высокий PSNR.
+            Оригинальные веса восстанавливаются после валидации.
+            """
             self.model.eval()
+
+            # Временно применяем EMA-веса
+            backup: Dict[str, torch.Tensor] = {}
+            if self.ema is not None:
+                for name, param in self.model.named_parameters():
+                    backup[name] = param.data.clone()
+                self.ema.apply_to(self.model)
+
             psnr_sum, count = 0.0, 0
             for lr_batch, hr_batch in val_loader:
                 lr_batch = lr_batch.to(self.device)
@@ -503,6 +641,11 @@ if TORCH_AVAILABLE:
                 pred     = self.model(lr_batch).clamp(0, 1)
                 psnr_sum += self.calc_psnr(pred, hr_batch)
                 count    += 1
+
+            # Восстанавливаем оригинальные веса
+            if self.ema is not None:
+                self.ema.restore(self.model, backup)
+
             return psnr_sum / max(count, 1)
 
 

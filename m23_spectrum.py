@@ -145,9 +145,6 @@ def generate_m23_stable_spectrum(fan_in: int, seed: Optional[int] = None,
         if cached is not None:
             return cached.copy()
     
-    if seed is not None:
-        np.random.seed(seed)
-    
     # Compute Elkies polynomial roots
     elkies_roots = _compute_elkies_polynomial_roots()
     
@@ -165,6 +162,12 @@ def generate_m23_stable_spectrum(fan_in: int, seed: Optional[int] = None,
     
     # Normalize spectrum
     spectrum = _normalize_spectrum(spectrum, scaling_factor)
+
+    # Optional reproducible perturbation via thread-safe default_rng
+    if seed is not None:
+        rng = np.random.default_rng(seed)
+        noise = rng.standard_normal(fan_in) * 1e-8
+        spectrum = spectrum + noise.astype(spectrum.dtype)
     
     # Cache the result
     if use_cache:

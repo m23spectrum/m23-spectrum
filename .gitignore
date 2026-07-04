@@ -130,7 +130,7 @@ dmypy.json
 *.ckpt
 *.pth
 *.pt
-models/
+/models/
 checkpoints/
 results/
 logs/

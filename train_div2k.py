@@ -37,7 +37,10 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import functional as TF
 from PIL import Image
 
-from m23_sr_engine import M23_RLFN, SRTrainer, CombinedSRLoss, WarmStartScheduler
+from m23_sr_engine import (
+    M23_RLFN, SRTrainer, CombinedSRLoss, WarmStartScheduler,
+    ModelEMA, CosineWarmStartScheduler
+)
 
 
 # ══════════════════════════════════════════════════════════
@@ -176,21 +179,28 @@ def save_checkpoint(
     path:      str,
     model:     nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: WarmStartScheduler,
+    scheduler,
     iteration: int,
     best_psnr: float,
     scaler=None,
+    ema=None,
 ):
     ckpt = {
         "iteration": iteration,
         "best_psnr": best_psnr,
         "model":     model.state_dict(),
         "optimizer": optimizer.state_dict(),
+        "scheduler_type": type(scheduler).__name__,
         "scheduler": {
-            "current_iter":  scheduler.current_iter,
-            "current_stage": scheduler.current_stage,
+            "current_iter": getattr(scheduler, "current_iter", 0),
+            "current_stage": getattr(scheduler, "current_stage", 0),
+            "_iter": getattr(scheduler, "_iter", 0),
+            "_cycle": getattr(scheduler, "_cycle", 0),
+            "_T_cur": getattr(scheduler, "_T_cur", 0),
         },
     }
+    if ema is not None:
+        ckpt["ema"] = ema.shadow
     if scaler is not None:
         ckpt["scaler"] = scaler.state_dict()
     torch.save(ckpt, path)
@@ -200,14 +210,29 @@ def load_checkpoint(
     path:      str,
     model:     nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: WarmStartScheduler,
+    scheduler,
     scaler=None,
+    ema=None,
 ) -> Tuple[int, float]:
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model"])
     optimizer.load_state_dict(ckpt["optimizer"])
-    scheduler.current_iter  = ckpt["scheduler"]["current_iter"]
-    scheduler.current_stage = ckpt["scheduler"]["current_stage"]
+    
+    s_ckpt = ckpt.get("scheduler", {})
+    if hasattr(scheduler, "current_iter"):
+        scheduler.current_iter = s_ckpt.get("current_iter", 0)
+    if hasattr(scheduler, "current_stage"):
+        scheduler.current_stage = s_ckpt.get("current_stage", 0)
+    if hasattr(scheduler, "_iter"):
+        scheduler._iter = s_ckpt.get("_iter", 0)
+    if hasattr(scheduler, "_cycle"):
+        scheduler._cycle = s_ckpt.get("_cycle", 0)
+    if hasattr(scheduler, "_T_cur"):
+        scheduler._T_cur = s_ckpt.get("_T_cur", scheduler.T0)
+        
+    if ema is not None and "ema" in ckpt:
+        ema.shadow = ckpt["ema"]
+        
     if scaler is not None and "scaler" in ckpt:
         scaler.load_state_dict(ckpt["scaler"])
     print(f"[Resume] iter={ckpt['iteration']}  best_psnr={ckpt['best_psnr']:.4f} dB")
@@ -286,18 +311,29 @@ def train(args):
         model.parameters(), lr=2e-4, betas=(0.9, 0.999), eps=1e-8,
     )
     total_iters = args.total_iters
-    stages = [
-        {"lr": 2e-4, "iters": total_iters // 3},
-        {"lr": 1e-4, "iters": total_iters // 3},
-        {"lr": 5e-5, "iters": total_iters - 2 * (total_iters // 3)},
-    ]
-    scheduler = WarmStartScheduler(optimizer, stages)
-    scaler    = torch.amp.GradScaler(args.device) if args.device == "cuda" else None
+    
+    if args.cosine:
+        scheduler = CosineWarmStartScheduler(
+            optimizer, lr_max=2e-4, lr_min=1e-6,
+            T0=100_000, T_mult=2,
+        )
+    else:
+        stages = [
+            {"lr": 2e-4, "iters": total_iters // 3},
+            {"lr": 1e-4, "iters": total_iters // 3},
+            {"lr": 5e-5, "iters": total_iters - 2 * (total_iters // 3)},
+        ]
+        scheduler = WarmStartScheduler(optimizer, stages)
+
+    scaler = torch.amp.GradScaler(args.device) if args.device == "cuda" else None
+    
+    # EMA Setup
+    ema = ModelEMA(model, decay=0.999) if args.ema else None
 
     # Resume
     start_iter, best_psnr = 0, 0.0
     if args.resume and Path(args.resume).exists():
-        start_iter, best_psnr = load_checkpoint(args.resume, model, optimizer, scheduler, scaler)
+        start_iter, best_psnr = load_checkpoint(args.resume, model, optimizer, scheduler, scaler, ema)
 
     logger = TrainLogger(os.path.join(args.save_dir, "train_log.csv"))
 
@@ -305,6 +341,7 @@ def train(args):
     print(f"  Training M23-RLFN on DIV2K ×{args.scale}")
     print(f"  Device: {args.device.upper()}")
     print(f"  Total iters: {total_iters:,}  |  Batch: {args.batch_size}")
+    print(f"  Cosine Scheduler: {args.cosine}  |  Model EMA: {args.ema}")
     print(f"{'='*60}\n")
 
     iteration   = start_iter
@@ -343,6 +380,10 @@ def train(args):
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
+        # Update EMA
+        if ema is not None:
+            ema.update(model)
+
         scheduler.step()
         iteration += 1
 
@@ -368,6 +409,14 @@ def train(args):
         # Валидация
         if iteration % args.val_every == 0:
             model.eval()
+            
+            # Apply EMA weights for validation
+            backup = {}
+            if ema is not None:
+                for name, param in model.named_parameters():
+                    backup[name] = param.data.clone()
+                ema.apply_to(model)
+                
             val_psnr_sum = 0.0
             with torch.no_grad():
                 for lr_v, hr_v in val_loader:
@@ -381,6 +430,9 @@ def train(args):
                     val_psnr_sum += calc_psnr(pred_v, hr_v, border=args.scale)
             val_psnr = val_psnr_sum / len(val_loader)
             print(f"\n>>> VAL PSNR: {val_psnr:.4f} dB  (best: {best_psnr:.4f} dB)")
+            # Restore live weights
+            if ema is not None:
+                ema.restore(model, backup)
 
             logger.log({
                 "iter": iteration, "loss": "-", "psnr_train": "-",
@@ -388,12 +440,12 @@ def train(args):
             })
 
             ckpt_path = os.path.join(args.save_dir, f"m23_rlfn_iter{iteration}.pth")
-            save_checkpoint(ckpt_path, model, optimizer, scheduler, iteration, val_psnr, scaler)
+            save_checkpoint(ckpt_path, model, optimizer, scheduler, iteration, val_psnr, scaler, ema)
 
             if val_psnr > best_psnr:
                 best_psnr = val_psnr
                 best_path = os.path.join(args.save_dir, "m23_rlfn_best.pth")
-                save_checkpoint(best_path, model, optimizer, scheduler, iteration, val_psnr, scaler)
+                save_checkpoint(best_path, model, optimizer, scheduler, iteration, val_psnr, scaler, ema)
                 print(f"  ★ New best: {best_psnr:.4f} dB → {best_path}\n")
 
     print(f"\nTraining complete. Best PSNR: {best_psnr:.4f} dB")
@@ -453,6 +505,10 @@ def parse_args():
     p.add_argument("--num_workers", type=int,   default=4)
     p.add_argument("--device",      default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--seed",        type=int,   default=42)
+    p.add_argument("--cosine",      action="store_true", default=True, help="Use CosineAnnealingWarmRestarts scheduler")
+    p.add_argument("--no_cosine",   action="store_false", dest="cosine", help="Use multi-stage WarmStartScheduler")
+    p.add_argument("--ema",         action="store_true", default=True, help="Use Exponential Moving Average of weights")
+    p.add_argument("--no_ema",      action="store_false", dest="ema", help="Disable Model EMA")
     # Логи и чекпоинты
     p.add_argument("--save_dir",    default="checkpoints/m23_rlfn")
     p.add_argument("--resume",      default=None)
