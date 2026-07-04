@@ -75,14 +75,27 @@ python -m m23_spectrum.demo
 
 ```python
 from m23_spectrum.losses import (
-    CombinedSRLoss,    # Optimal for SR training
+    CombinedSRLoss,    # Charbonnier + FFT + SSIM
     LPIPSLoss,         # Perceptual quality
     GANLoss,           # Realistic textures
-    MultiScaleLoss,    # Better gradient flow
+    MultiScaleLoss,    # Multi-scale gradient flow
 )
 
-# Combined loss for best results
-criterion = CombinedSRLoss(freq_weight=0.05)
+# Combined loss with structural and frequency constraints
+criterion = CombinedSRLoss(freq_weight=0.05, ssim_weight=0.1)
+```
+
+### Model EMA & Cosine Annealing (2026 Standards)
+
+```python
+from m23_spectrum.models import M23RLFN
+from m23_sr_engine import ModelEMA, CosineWarmStartScheduler
+
+# Keep a stable moving average of weights (+0.1 dB PSNR boost)
+ema = ModelEMA(model, decay=0.999)
+
+# Escapes local minima during training
+scheduler = CosineWarmStartScheduler(optimizer, lr_max=2e-4, T0=100000)
 ```
 
 ### Test-Time Augmentation (TTA)
@@ -90,7 +103,7 @@ criterion = CombinedSRLoss(freq_weight=0.05)
 ```python
 from m23_spectrum import TTAUpscaler
 
-# Free +0.1-0.3 dB boost
+# Free +0.1-0.3 dB boost on validation/inference
 upscaler = TTAUpscaler("m23-rlfn-x4", tta_mode="full")
 sr_image = upscaler.upscale("input.png")
 ```
@@ -98,16 +111,19 @@ sr_image = upscaler.upscale("input.png")
 ### Custom Model Training
 
 ```python
-from m23_spectrum import M23RLFN, CombinedSRLoss
-from m23_spectrum.data import DIV2KDataset
+from m23_spectrum.models import M23RLFN
+from m23_spectrum.losses import CombinedSRLoss
+from m23_sr_engine import ModelEMA, CosineWarmStartScheduler
 import torch
 
 # Create model
 model = M23RLFN(n_feats=52, n_blocks=8, scale=4).cuda()
+ema = ModelEMA(model, decay=0.999)
 
 # Training setup
-criterion = CombinedSRLoss(freq_weight=0.05)
+criterion = CombinedSRLoss(freq_weight=0.05, ssim_weight=0.1)
 optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+scheduler = CosineWarmStartScheduler(optimizer, lr_max=2e-4)
 
 # Training loop
 for lr_batch, hr_batch in train_loader:
@@ -118,6 +134,10 @@ for lr_batch, hr_batch in train_loader:
     loss = criterion(sr, hr_batch)
     loss.backward()
     optimizer.step()
+    
+    # Update EMA and learning rate
+    ema.update(model)
+    scheduler.step()
 ```
 
 ---
