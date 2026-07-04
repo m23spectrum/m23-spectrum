@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "m23-spectrum"
-version = "1.0.0"
+version = "1.1.0"
 description = "Professional Super-Resolution Library with M23-Spectrum Weight Initialization"
 readme = "README.md"
 license = {text = "MIT"}

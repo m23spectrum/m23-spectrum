@@ -20,7 +20,7 @@ Example:
 License: MIT
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "M23-Spectrum Team"
 __license__ = "MIT"
 
